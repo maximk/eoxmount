@@ -1,0 +1,126 @@
+#!/usr/bin/perl
+
+use strict; use warnings;
+
+use Getopt::Long;
+use File::Which;
+use IO::Socket;
+use Fcntl;
+use bytes;
+
+my $top_sock;
+
+####
+my $opt_verbose = 0;
+my $opt_user = "root";
+
+my $ok = GetOptions (
+						"verbose" => \$opt_verbose,
+					 	"user=s" => \$opt_user
+					);
+
+usage() unless $ok and $#ARGV == 1;
+
+####
+my $server_host;
+my $server_port = 564;
+my $remote_aname;
+my $mount_at;
+my $server_fdno;
+
+&parse_options;
+&check_prerequisites;
+&munge_authentication;
+&execute_mount;
+
+print "mount $remote_aname from $server_host:$server_port at $mount_at\n";
+
+sub parse_options {
+	my $target;
+	($target, $mount_at) = @ARGV;
+	if ($target =~ /([^:]+):(\d+):([^:]+)/) {
+		($server_host, $server_port, $remote_aname) = ($1, $2, $3);
+	} elsif ($target =~ /([^:]+):([^:]+)/) {
+		($server_host, $remote_aname) = ($1, $2);
+	} else {
+		usage();
+	}
+}
+
+sub check_prerequisites {
+	die "eoxmount: munge must be installed\n" unless which("munge");
+	die "eoxmount: $mount_at is not a directory\n" unless -d $mount_at;
+}
+
+sub munge_authentication {
+	my $reply;
+
+	## obtain the credential using a command-line utility
+	my $munge = `echo|munge`;
+	chomp $munge;
+
+	$top_sock = IO::Socket::INET->new("$server_host:$server_port");
+
+	# Tversion -> Rversion
+	my $version = roundtrip($top_sock,
+			pack("c v V v a*", 100, -1, 4096, 8, "9P2000.u"));
+	$reply = unpack("c", $version);
+	die "eoxmount: protocol negotiation error\n" unless $reply == 100 +1;
+
+	# Tauth -> Rauth (use 9P2000.u flavour of the auth)
+	my $auth = roundtrip($top_sock,
+			pack("c v V va* va* V", 102, 0, 0,
+					length($opt_user), $opt_user,
+					length($remote_aname), $remote_aname),
+					-1);		## TODO: make n_uname an option
+	$reply = unpack("c", $auth);
+	die "eoxmount: unable to start authentication\n" unless $reply == 102 +1;
+
+	# Twrite -> Rwrite
+	my $write = roundtrip($top_sock,
+			pack("c v V VV V a*", 118, 0, 0, 0, 0, length($munge), $munge));
+	$reply = unpack("c", $write);
+	die "eoxmount: authentication failed\n" unless $reply == 118 +1;
+
+	## diodmount does this
+	$top_sock->blocking(0);
+
+	## clear FD_CLOEXEC flag -- we need the socket after exec
+	my $flags = fcntl($top_sock, F_GETFD, 0) or die "fcntl: $!\n";
+	fcntl ($top_sock, F_SETFD, $flags & ~FD_CLOEXEC) or die "fcntl: $!\n";
+
+	$server_fdno = $top_sock->fileno;
+	print "eoxmount: fdno $server_fdno is pre-authenticated\n" if $opt_verbose;
+}
+
+sub execute_mount {
+	my $opts = "trans=fd," .
+			   "uname=$opt_user," .
+			   "aname=$remote_aname," .
+			   "rfdno=$server_fdno," .
+			   "wfdno=$server_fdno";
+
+    my $command = "mount -t 9p -o $opts $server_host $mount_at";
+	print "eoxmount: exec: $command\n" if $opt_verbose;
+
+	exec($command) or die "eoxmount: cannot exec mount\n";
+}
+
+sub usage {
+	die "Usage: eoxmount [-v] host[:port]:path directory\n";
+}
+
+sub roundtrip {
+	my ($top_sock, $packet) = @_;
+	my $outgoing_size = length($packet) +4;
+	$top_sock->send(pack("Va*", $outgoing_size, $packet));
+
+	my ($buf, $reply);
+	$top_sock->recv($buf, 4);
+	my $expected_size = unpack("V", $buf);
+	$top_sock->recv($reply, $expected_size);
+
+	$reply;
+}
+
+#EOF
