@@ -82,6 +82,12 @@ sub munge_authentication {
 	$reply = unpack("c", $write);
 	die "eoxmount: authentication failed\n" unless $reply == 118 +1;
 
+	# Tclunk -> Rclunk
+	my $clunk = roundtrip($top_sock,
+			pack("c v V", 120, 0, 0));
+	$reply = unpack("c", $clunk);
+	die "eoxmount: clunk failed\n" unless $reply == 120 +1;
+
 	## diodmount does this
 	$top_sock->blocking(0);
 
