@@ -60,6 +60,7 @@ sub munge_authentication {
 	chomp $munge;
 
 	$top_sock = IO::Socket::INET->new("$server_host:$server_port");
+	die "eoxmount: could not connect to 9p server, perhaps forgot to add listener? ($!)" unless $top_sock;
 
 	# Tversion -> Rversion
 	my $version = roundtrip($top_sock,
